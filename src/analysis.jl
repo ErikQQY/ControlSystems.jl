@@ -493,15 +493,20 @@ The notation follows "An Introduction to Disk Margins", Peter Seiler, Andrew Pac
 The "disk" margin becomes a half plane for `α = 2` and an inverted circle for `α > 2`. In this case, the upper gain margin is infinite. See the paper for more details, in particular figure 6.
 """
 struct Diskmargin
-    α::Float64
-    ω0::Float64
-    f0::ComplexF64
-    δ0::ComplexF64
-    γmin::Float64
-    γmax::Float64
-    σ::Float64
-    ϕm::Float64
+    α
+    ω0
+    f0
+    δ0
+    γmin
+    γmax
+    σ
+    ϕm
     L
+end
+
+function Diskmargin(α; ω0=0, L=nothing, σ=0)
+    d = Disk(; α, σ=0)
+    Diskmargin(α, ω0, nothing, nothing, d.γmin, d.γmax, σ, d.ϕm, L)
 end
 
 function Base.show(io::IO, dm::Diskmargin)
@@ -535,13 +540,15 @@ A disk can be converted to a Nyquist exclusion disk by `nyquist(disk)` and plott
 If γmax < γmin the disk is inverted.
 See [`diskmargin`](@ref) for disk margin computations. 
 """
-struct Disk
-    γmin::Float64
-    γmax::Float64
-    c::Float64
-    r::Float64
-    ϕm::Float64
+struct Disk{T}
+    γmin::T
+    γmax::T
+    c::T
+    r::T
+    ϕm::T
 end
+
+Disk(args...) = Disk(promote(args...)...)
 
 center_radius(γmin, γmax) = 1/2 * (γmax + γmin), 1/2 * (γmax - γmin)
 
@@ -552,11 +559,12 @@ end
 
 function Disk(γmin, γmax, c, r)
     if !isfinite(γmax)
-        ϕm = 90
+        ϕm = 90.0
     else
         ϕm = (1 + γmin*γmax) / (γmin + γmax)
         ϕm = ϕm >= 1 ? Inf : rad2deg(acos(ϕm))
     end
+    # ϕm = rad2deg(acos((1 + c^2 - r^2)/2c))
     Disk(γmin, γmax, c, r, ϕm)
 end
 
@@ -573,20 +581,24 @@ nyquist(d::Disk) = Disk(-inv(d.γmin), -inv(d.γmax)) # translate the disk to a 
     diskmargin(L, σ = 0)
     diskmargin(L, σ::Real, ω)
 
-Calculate the disk margin of LTI system `L`.
+Calculate the disk margin of LTI system `L`. `L` is supposed to be a loop-transfer function, i.e., it should be square. If `L = PC` the disk margin for output perturbations is computed, whereas if `L = CP`, input perturbations are considered. If the method `diskmargin(P, C, args...)` is used, both are computed.
 
 The implementation and notation follows
 "An Introduction to Disk Margins", Peter Seiler, Andrew Packard, and Pascal Gahinet
+https://arxiv.org/abs/2003.04771
 
 The margins are aviable as fields of the returned objects, see [`Diskmargin`](@ref).
 
 # Arguments:
-- `L`: A loop-transfer function.
+- `L`: A loop-transfer function. If `L` is MIMO, the diskmargin is calculated for one loop at the time. This results in an optimistic diskmargin that does not neccesarily reflect the margin to simultaneous perturbations in different channels. 
 - `σ`: If little is known about the distribution of gain variations then σ = 0
 is a reasonable choice as it allows for a gain increase or decrease by the same relative amount.
 The choice σ < 0 is justified if the gain can decrease by a larger factor than it can increase.
 Similarly, the choice σ > 0 is justified when the gain can increase by a larger factor than it can
 decrease.
+If σ = −1 then the disk margin condition is αmax = inv(MT). This margin is related to the robust
+stability condition for models with multiplicative uncertainty of the form P (1 + δ).
+If σ = +1 then the disk margin condition is αmax = inv(MS)
 - `kwargs`: Are sent to the [`hinfnorm`](@ref) calculation
 - `ω`: If a vector of frequencies is supplied, the frequency-dependent disk margin will be computed, see example below.
 
@@ -603,32 +615,80 @@ nyquistplot!(dm.f0*L) # If we perturb the system with the worst-case perturbatio
 ## Frequency-dependent margin
 w = exp10.(LinRange(-2, 2, 500))
 dms = diskmargin(L, 0, w)
-plot(w, dms)
+plot(dms)
 ```
 """
-function diskmargin(L, σ::Real=0; kwargs...)
-    issiso(L) || error("MIMO not yet supported in diskmargin.")
+function diskmargin(L::LTISystem, σ::Real=0; kwargs...)
+    issiso(L) || return mimo_diskmargin(L, σ; kwargs...)
     S̄ = 1/(1 + L) + (σ-1)/2
     n,ω0 = hinfnorm(S̄; kwargs...)
+    if isnan(ω0)
+        throw(ArgumentError("hinfnorm failed"))
+    end
     diskmargin(L, σ, ω0)
 end
 
 diskmargin(L, σ::Real, ω::AbstractArray) = map(w->diskmargin(L, σ, w), ω)
 
-function diskmargin(L, σ::Real, ω0::Real)
-    issiso(L) || error("MIMO not yet supported in diskmargin.") # Calculation of structured singular values required, determine if det(I-MΔ) can be 0
+function diskmargin(L::LTISystem, σ::Real, ω0::Real)
+    issiso(L) || return mimo_diskmargin(L, σ, ω0) 
+    # isfinite(ω0) || throw(ArgumentError("ω0 must be finite"))
     S̄ = 1/(1 + L) + (σ-1)/2
     freq = isdiscrete(L) ? cis(ω0*L.Ts) : complex(0, ω0)
-    Sω = S̄(freq)[]
+    Sω = evalfr(S̄, freq)[]
     αmax = 1/abs(Sω)
     δ0 = inv(Sω)
     dp = Disk(; α = αmax, σ)
     if δ0 == 2/(σ+1)  # S = 1, L = 0
         Diskmargin(αmax, ω0, Inf, δ0, 0, Inf, σ, dp.ϕm, L)
     else
-        f0 = (2 + δ0*(1-σ)) / (2 - δ0*(1+σ))
+        f0 = (2 + δ0*(1-σ)) / (2 - δ0*(1+σ)) # The worst-case perturbation of size αmax
         Diskmargin(αmax, ω0, f0, δ0, dp.γmin, dp.γmax, σ, dp.ϕm, L)
     end
+end
+
+"""
+    dms = diskmargin(P::LTISystem, C::LTISystem, args...; kwargs...)
+
+Calculate disk margins when the feeback loop is broken at both the input and output of `P`. 
+`dms` is a named tuple with fields `input` and `output`, where each entry will be a vector of disk margins the length of the number of inputs / outputs of `P` respectively
+"""
+function diskmargin(P::LTISystem, C::LTISystem, args...; kwargs...)
+    input = diskmargin(C*P, args...; kwargs...)
+    output = diskmargin(P*C, args...; kwargs...)
+    (; input, output)
+end
+
+function mimo_diskmargin(L, args...; kwargs...)
+    # For simultanuous perturbations, calculation of structured singular values required, determine if det(I-MΔ) can be 0
+    dms = map(1:L.ny) do i
+        open_L = broken_feedback(L, i)
+
+        diskmargin((open_L), args...; kwargs...)
+    end
+end
+
+"""
+    broken_feedback(L, i)
+
+Closes all loops in square MIMO system `L` except for loops `i`.
+Forms L1 in fig 14. of "An Introduction to Disk Margins" https://arxiv.org/abs/2003.04771
+"""
+function broken_feedback(L, i)
+    ny, nu = size(L)
+    ny == nu || throw(ArgumentError("Only square loop-transfer functions supported"))
+    connection_inds = setdiff(1:ny, i)
+    i isa AbstractVector || (i = [i])
+    open_L = feedback(
+        L,
+        ss(I(ny-1), L.timeevol), # open one loop
+        U1 = connection_inds,
+        Y1 = connection_inds,
+        Z1 = i,
+        W1 = i,
+    )
+    @assert issiso(open_L)
+    open_L
 end
 
 

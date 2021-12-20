@@ -1,6 +1,6 @@
-# Example from the paper
 using ControlSystems
 
+# Example from the paper
 L = tf(25, [1,10,10,10])
 dm = diskmargin(L, 0)
 @test dm.ω0 ≈ 1.94   atol=0.02
@@ -37,6 +37,28 @@ dms = diskmargin(L, 0, w)
 plot(w, dms) 
 
 
+## MIMO loop at a time
+a = 10
+P = [
+        tf([1,-a^2], [1, 0, a^2]) tf([a, a], [1, 0, a^2])
+        -tf([a, a], [1, 0, a^2]) tf([1,-a^2], [1, 0, a^2])
+    ]
+P = minreal(ss(P))
+K = ss(1.0I(2))
+Li = K*P
+Lo = P*K
+
+@test tf(minreal(ControlSystems.broken_feedback(Li, 1))) ≈ tf(1, [1, 0])
+@test tf(minreal(ControlSystems.broken_feedback(Lo, 1))) ≈ tf(1, [1, 0])
+
+dm = diskmargin(Li)[1]
+@test dm.α ≈ 2
+@test dm.γmax > 1e10
+@test dm.ϕm ≈ 90
+
+dmm = diskmargin(P, K)
+dmm.input[1].α == dm.α
+
 
 # using IntervalArithmetic
 # δ(a=1) = Complex(-a..a, -a..a)
@@ -44,3 +66,24 @@ plot(w, dms)
 # M = [0 1; -0.1 -0.1]
 # D = Δ(2, 1)
 # 0 ∈ det(I-M*D)
+
+
+L3 = let
+    tempA = [1.0 0.0 9.84 0.0 0.0; 0.0 1.0 0.01 2.14634e-6 0.0; 0.0 0.0 1.0 0.0 0.0; 0.0 0.0 0.0 1.0 -1.73983959887; 0.0 0.0 0.0 0.0 0.56597684805]
+    tempB = [0.0 4.901416e-5 0.00019883877999999998; 0.0 0.0 0.0; 0.0 0.0 4.0414389999999996e-5; 0.0 -0.02004649371 0.0; 0.0 -0.00490141631 0.0]
+    tempC = [0.0 -0.83516488404 0.0 0.0 0.0; 186.74725411661 0.0 0.0 0.0 0.0; -7.44299057498 0.0 7035.08410814126 0.0 0.0]
+    tempD = [0.0 0.0 0.0; 34875.36444283988 0.0 0.0; 48304.01940122544 0.0 0.0]
+    ss(tempA, tempB, tempC, tempD, 0.01)
+end
+
+w = 2π .* exp10.(LinRange(-2, 2, 300))
+
+dm = diskmargin(L3, 0, 4.05)
+@test dm[1].α ≈ 0.794418036911981 rtol=1e-3
+
+dm = diskmargin(L3, 0)
+
+dm = diskmargin(L3, ss(I(3), L3.Ts), 0, w)
+plot(w, dm)
+
+

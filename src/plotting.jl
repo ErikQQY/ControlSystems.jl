@@ -779,30 +779,61 @@ end
     end
 end
 
-@recipe function plot(w::AbstractVector, dm::AbstractVector{Diskmargin})
-    length(w) == length(dm) || throw(ArgumentError("Frequency vector and diskmargin vector must have the same lengths."))
+@recipe function plot(dm::AbstractVector{<:AbstractVector{Diskmargin}})
+    w = [dm[1].ω0 for dm in dm]
+    ny = length(dm[1])
+    w, permutedims(reduce(hcat, dm))
+end
+
+
+@recipe function plot(dm::AbstractArray{Diskmargin})
+    w = getfield.(dm[:,1], :ω0)
+    ny = size(dm, 2)
+    length(w) == size(dm, 1) || throw(ArgumentError("Frequency vector and diskmargin vector must have the same lengths."))
     layout --> (2, 1)
     link --> :x
-    @series begin
-        subplot --> 1
-        title --> "Gain margin"
-        label --> ["Lower" "Upper"]
-        # xguide --> "Frequency"
-        xscale --> :log10
-        yscale --> :log10
-        gma = getfield.(dm, :γmax)
-        gmi = getfield.(dm, :γmin)
-        replace!(gmi, 0 => -Inf)
-        # ylims --> (0, min(10, maximum(gma)))
-        w, [gmi gma]
-    end
-    @series begin
-        subplot --> 2
-        title --> "Phase margin"
-        xguide --> "Frequency"
-        xscale --> :log10
-        label --> ""
-        ϕm = getfield.(dm, :ϕm)
-        w, ϕm
+    neg2inf(x) = x <= 0 ? Inf : x
+    for i = 1:ny
+        is = ny == 1 ? "" : "$i"
+        @series begin
+            subplot --> 1
+            title --> "Gain margin"
+            # label --> permutedims([["Lower $i" for i = 1:ny]; ["Upper $i" for i = 1:ny]])
+            label --> ["Upper"*is "Lower"*is]
+            # xguide --> "Frequency"
+            xscale --> :log10
+            yscale --> :log10
+            gma = getfield.(dm[:, i], :γmax) .|> neg2inf
+            gmi = getfield.(dm[:, i], :γmin) .|> neg2inf
+            replace!(gmi, 0 => -Inf)
+            # ylims --> (0, min(10, maximum(gma)))
+            w, [gmi gma]
+        end
+        @series begin
+            subplot --> 2
+            title --> "Phase margin"
+            xguide --> "Frequency"
+            xscale --> :log10
+            label --> is#permutedims(["$i" for i = 1:ny])
+            ϕm = getfield.(dm[:, i], :ϕm)
+            w, ϕm
+        end
     end
 end
+
+@recipe function plot(dm::NamedTuple{(:input, :output), Tuple{Vector{Vector{Diskmargin}}, Vector{Vector{Diskmargin}}}})
+    w = getfield.(dm.input, :ω0)
+    layout --> 4
+    @series begin
+        subplot --> [1 1 3]
+        title --> ["Gain margin at input" "Phase margin at input"]
+        w, dm.input
+    end
+    @series begin
+        subplot --> [2 2 4]
+        title --> ["Gain margin at output" "Phase margin at output"]
+        w, dm.output
+    end
+
+end
+
